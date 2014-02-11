@@ -16,6 +16,7 @@
         update_counter/3, remove_ancestors/2, create_monitors/1, kv/2,
         remove_down_workers/2]).
 -export([request_timeout/0]).
+-export([merge_size_objects/1]).
 
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
@@ -140,6 +141,28 @@ remove_ancestors([Error | Tail], Acc) ->
 create_monitors(Shards) ->
     MonRefs = lists:usort([{rexi_server, N} || #shard{node=N} <- Shards]),
     rexi_monitor:start(MonRefs).
+
+% This is used to merge the new size objects found in database
+% and view info blobs for clustered calls.
+merge_size_objects(SizeObjects) ->
+    Dict = lists:foldl(fun({Props}, D) ->
+        lists:foldl(fun({K, V}, D0) ->
+            orddict:append(K, V, D0)
+        end, D, Props)
+    end, orddict:new(), SizeObjects),
+    orddict:fold(fun
+        (file, X, Acc) ->
+            [{file, lists:sum(X)} | Acc];
+        (active, X, Acc) ->
+            case lists:member(null, X) of
+                true ->
+                    [{active, null} | Acc];
+                false ->
+                    [{active, lists:sum(X)} | Acc]
+            end;
+        (external, X, Acc) ->
+            [{external, lists:sum(X)} | Acc]
+    end, [], Dict).
 
 %% verify only id and rev are used in key.
 update_counter_test() ->
