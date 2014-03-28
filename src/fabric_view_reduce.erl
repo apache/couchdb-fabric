@@ -12,29 +12,19 @@
 
 -module(fabric_view_reduce).
 
--export([go/6]).
+-export([go/7]).
 
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
 
-go(DbName, GroupId, View, Args, Callback, Acc0) when is_binary(GroupId) ->
-    {ok, DDoc} = fabric:open_doc(DbName, <<"_design/", GroupId/binary>>, []),
-    go(DbName, DDoc, View, Args, Callback, Acc0);
-
-go(DbName, DDoc, VName, Args, Callback, Acc0) ->
-    Group = couch_view_group:design_doc_to_view_group(DDoc),
-    Lang = couch_view_group:get_language(Group),
-    Views = couch_view_group:get_views(Group),
-    {NthRed, View} = fabric_view:extract_view(nil, VName, Views, reduce),
-    {VName, RedSrc} = lists:nth(NthRed, View#mrview.reduce_funs),
-    Workers = lists:map(fun(#shard{name=Name, node=N} = Shard) ->
-        Ref = rexi:cast(N, {fabric_rpc, reduce_view, [Name,DDoc,VName,Args]}),
-        Shard#shard{ref = Ref}
-    end, fabric_view:get_shards(DbName, Args)),
+go(DbName, DDoc, VName, Args, Callback, Acc0, {red, {_, Lang, _}, _}=VInfo) ->
+    Shards = fabric_view:get_shards(DbName, Args),
+    Workers = fabric_util:submit_jobs(Shards, reduce_view, [DDoc, VName, Args]),
+    RedSrc = couch_mrview_util:extract_view_reduce(VInfo),
     RexiMon = fabric_util:create_monitors(Workers),
-    #mrargs{limit = Limit, skip = Skip} = Args,
+    #mrargs{limit = Limit, skip = Skip, keys = Keys} = Args,
     OsProc = case os_proc_needed(RedSrc) of
         true -> couch_query_servers:get_os_process(Lang);
         _ -> nil
@@ -44,7 +34,7 @@ go(DbName, DDoc, VName, Args, Callback, Acc0) ->
         query_args = Args,
         callback = Callback,
         counters = fabric_dict:init(Workers, 0),
-        keys = Args#mrargs.keys,
+        keys = Keys,
         skip = Skip,
         limit = Limit,
         lang = Lang,
@@ -83,6 +73,30 @@ handle_message({rexi_EXIT, Reason}, Worker, State) ->
         {ok, Resp} = Callback({error, fabric_util:error_info(Reason)}, Acc),
         {error, Resp}
     end;
+
+%% HACK: this just sends meta once. Instead we should move the counter logic
+%% from the #view_row handle_message below into this function and and pass the
+%% meta call through maybe_send_row. This will also be more efficient doing it
+%% here as it's one less worker round trip reply.
+%% Prior to switching to couch_mrview, the fabric_view_reduce implementation
+%% did not get a total_and_offset call, whereas now we do. We now use this
+%% message as a clean way to indicate to couch_mrview_http:view_cb that the
+%% reduce response is starting.
+handle_message({meta, Meta}, {_Worker, From}, State) ->
+    gen_server:reply(From, ok),
+    #collector{
+        callback = Callback,
+        user_acc = AccIn
+    } = State,
+
+    {Go, Acc} = case get(meta_sent) of
+        undefined ->
+            put(meta_sent, true),
+            Callback({meta, Meta}, AccIn);
+        _ ->
+            {ok, AccIn}
+    end,
+    {Go, State#collector{user_acc = Acc}};
 
 handle_message(#view_row{key=Key} = Row, {Worker, From}, State) ->
     #collector{counters = Counters0, rows = Rows0} = State,
