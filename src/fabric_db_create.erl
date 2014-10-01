@@ -58,12 +58,25 @@ generate_shard_map(DbName, Options) ->
     {MegaSecs, Secs, _} = now(),
     Suffix = "." ++ integer_to_list(MegaSecs*1000000 + Secs),
     Shards = mem3:choose_shards(DbName, [{shard_suffix,Suffix} | Options]),
-    case mem3_util:open_db_doc(DbName) of
-    {ok, Doc} ->
+    HashAlgo = case couch_util:get_value(hash_algo, Options) of
+        undefined ->
+            <<"crc32">>;
+        HashAlgo0 ->
+            {ok, HashAlgos} = application:get_env(mem3, hash_algorithms),
+            case couch_util:get_value(HashAlgo0, HashAlgos) of
+                undefined ->
+                    throw({bad_request, <<"unknown hash algorithm">>});
+                _ ->
+                    list_to_binary(HashAlgo0)
+            end
+    end,
+
+    Doc = case mem3_util:open_db_doc(DbName) of
+    {ok, Doc0} ->
         % the DB already exists, and may have a different Suffix
-        ok;
+        Doc0;
     {not_found, _} ->
-        Doc = make_document(Shards, Suffix)
+        make_document(Shards, Suffix, HashAlgo)
     end,
     {Shards, Doc}.
 
@@ -149,7 +162,7 @@ maybe_stop(W, Counters) ->
         end
     end.
 
-make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
+make_document([#shard{dbname=DbName}|_] = Shards, Suffix, HashAlgo) ->
     {RawOut, ByNodeOut, ByRangeOut} =
     lists:foldl(fun(#shard{node=N, range=[B,E]}, {Raw, ByNode, ByRange}) ->
         Range = ?l2b([couch_util:to_hex(<<B:32/integer>>), "-",
@@ -160,6 +173,7 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
     end, {[], [], []}, Shards),
     #doc{id=DbName, body = {[
         {<<"shard_suffix">>, Suffix},
+        {<<"hash_algorithm">>, HashAlgo},
         {<<"changelog">>, lists:sort(RawOut)},
         {<<"by_node">>, {[{K,lists:sort(V)} || {K,V} <- ByNodeOut]}},
         {<<"by_range">>, {[{K,lists:sort(V)} || {K,V} <- ByRangeOut]}}
