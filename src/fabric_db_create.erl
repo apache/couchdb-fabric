@@ -49,6 +49,8 @@ validate_dbname(DbName, Options) ->
             ok;
         nomatch when DbName =:= <<"_replicator">> ->
             ok;
+        nomatch when DbName =:= <<"_cassim">> ->
+            ok;
         nomatch ->
             {error, illegal_database_name}
         end
