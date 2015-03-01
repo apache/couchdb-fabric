@@ -7,7 +7,7 @@ For example, creating a database is a straightforward task in CouchDB 1.x, but f
 Fabric is used in conjunction with 'Rexi' which is also an application within CouchDB.
 
 ### Getting Started
-Fabric requires R13B03 or higher and can be built with [rebar][3], which comes bundled in the repository.
+Fabric requires R13B03 or higher and can be built with [rebar][3].
 
 ### License
 [Apache 2.0][2]
