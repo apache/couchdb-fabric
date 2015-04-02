@@ -23,6 +23,7 @@
     dbname,
     workers,
     r,
+    n,
     state,
     replies,
     q_reply
@@ -34,19 +35,21 @@ go(DbName, Id, Options) ->
         [Id, [deleted|Options]]),
     SuppressDeletedDoc = not lists:member(deleted, Options),
     N = mem3:n(DbName),
-    R = couch_util:get_value(r, Options, integer_to_list(mem3:quorum(DbName))),
+    R = list_to_integer(
+        couch_util:get_value(r, Options, integer_to_list(mem3:quorum(DbName)))),
     Acc0 = #acc{
         dbname = DbName,
         workers = Workers,
-        r = erlang:min(N, list_to_integer(R)),
-        state = r_not_met,
+        r = R,
+        n = N,
+        state = threshold_not_met,
         replies = []
     },
     RexiMon = fabric_util:create_monitors(Workers),
     try fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
     {ok, #acc{}=Acc} ->
         Reply = handle_response(Acc),
-        format_reply(Reply, SuppressDeletedDoc);
+        format_reply(Reply, SuppressDeletedDoc, Acc#acc.state, Options);
     {timeout, #acc{workers=DefunctWorkers}} ->
         fabric_util:log_timeout(DefunctWorkers, "open_doc"),
         {error, timeout};
@@ -75,18 +78,23 @@ handle_message({rexi_EXIT, _Reason}, Worker, Acc) ->
 handle_message(Reply, Worker, Acc) ->
     NewReplies = fabric_util:update_counter(Reply, 1, Acc#acc.replies),
     NewAcc = Acc#acc{replies = NewReplies},
-    case is_r_met(Acc#acc.workers, NewReplies, Acc#acc.r) of
-    {true, QuorumReply} ->
+    case {is_threshold_met(Acc#acc.workers, NewReplies, Acc#acc.r),
+          is_threshold_met(Acc#acc.workers, NewReplies, Acc#acc.n)} of
+    {{true, QuorumReply}, _} ->
         fabric_util:cleanup(lists:delete(Worker, Acc#acc.workers)),
         {stop, NewAcc#acc{workers=[], state=r_met, q_reply=QuorumReply}};
-    wait_for_more ->
+    {_, {true, QuorumReply}} ->
+        fabric_util:cleanup(lists:delete(Worker, Acc#acc.workers)),
+        {stop, NewAcc#acc{workers=[], state=n_met, q_reply=QuorumReply}};
+    {W1, W2} when W1 == wait_for_more; W2 == wait_for_more  ->
         NewWorkers = lists:delete(Worker, Acc#acc.workers),
         {ok, NewAcc#acc{workers=NewWorkers}};
-    no_more_workers ->
+    {N1, N2} when N1 == no_more_workers; N2 == no_more_workers ->
         {stop, NewAcc#acc{workers=[]}}
     end.
 
-handle_response(#acc{state=r_met, replies=Replies, q_reply=QuorumReply}=Acc) ->
+handle_response(#acc{state=State, replies=Replies, q_reply=QuorumReply}=Acc)
+  when State == r_met; State == n_met ->
     case {Replies, fabric_util:remove_ancestors(Replies, [])} of
         {[_], [_]} ->
             % Complete agreement amongst all copies
@@ -103,8 +111,8 @@ handle_response(#acc{state=r_met, replies=Replies, q_reply=QuorumReply}=Acc) ->
 handle_response(Acc) ->
     read_repair(Acc).
 
-is_r_met(Workers, Replies, R) ->
-    case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Replies) of
+is_threshold_met(Workers, Replies, Threshold) ->
+    case lists:dropwhile(fun({_,{_, Count}}) -> Count < Threshold end, Replies) of
     [{_,{QuorumReply, _}} | _] ->
         {true, QuorumReply};
     [] when length(Workers) > 1 ->
@@ -156,13 +164,20 @@ choose_reply(Docs) ->
     end, Docs),
     {ok, Winner}.
 
-format_reply({ok, #doc{deleted=true}}, true) ->
+
+format_reply({ok, #doc{deleted=true}}, true, _, _) ->
     {not_found, deleted};
-format_reply(Else, _) ->
+format_reply({ok, Doc}, _, RMet, Options) ->
+    Meta = case lists:member(is_r_met, Options) of
+        true -> [{r_met, RMet == r_met} | Doc#doc.meta];
+        false -> Doc#doc.meta
+    end,
+    {ok, Doc#doc{meta=Meta}};
+format_reply(Else, _, _, _) ->
     Else.
 
 
-is_r_met_test() ->
+is_threshold_met_test() ->
     Workers0 = [],
     Workers1 = [nil],
     Workers2 = [nil,nil],
@@ -171,71 +186,71 @@ is_r_met_test() ->
 
     ?assertEqual(
         {true, foo},
-        is_r_met([], [fabric_util:kv(foo,2)], 2)
+        is_threshold_met([], [fabric_util:kv(foo,2)], 2)
     ),
 
     ?assertEqual(
         {true, foo},
-        is_r_met([], [fabric_util:kv(foo,3)], 2)
+        is_threshold_met([], [fabric_util:kv(foo,3)], 2)
     ),
 
     ?assertEqual(
         {true, foo},
-        is_r_met([], [fabric_util:kv(foo,1)], 1)
+        is_threshold_met([], [fabric_util:kv(foo,1)], 1)
     ),
 
     ?assertEqual(
         {true, foo},
-        is_r_met([], [fabric_util:kv(foo,2), fabric_util:kv(bar,1)], 2)
+        is_threshold_met([], [fabric_util:kv(foo,2), fabric_util:kv(bar,1)], 2)
     ),
 
     ?assertEqual(
         {true, bar},
-        is_r_met([], [fabric_util:kv(bar,1), fabric_util:kv(bar,2)], 2)
+        is_threshold_met([], [fabric_util:kv(bar,1), fabric_util:kv(bar,2)], 2)
     ),
 
     ?assertEqual(
         {true, bar},
-        is_r_met([], [fabric_util:kv(bar,2), fabric_util:kv(foo,1)], 2)
+        is_threshold_met([], [fabric_util:kv(bar,2), fabric_util:kv(foo,1)], 2)
     ),
 
     % Not met, but wait for more messages
 
     ?assertEqual(
         wait_for_more,
-        is_r_met(Workers2, [fabric_util:kv(foo,1)], 2)
+        is_threshold_met(Workers2, [fabric_util:kv(foo,1)], 2)
     ),
 
     ?assertEqual(
         wait_for_more,
-        is_r_met(Workers2, [fabric_util:kv(foo,2)], 3)
+        is_threshold_met(Workers2, [fabric_util:kv(foo,2)], 3)
     ),
 
     ?assertEqual(
         wait_for_more,
-        is_r_met(Workers2, [fabric_util:kv(foo,1), fabric_util:kv(bar,1)], 2)
+        is_threshold_met(Workers2, [fabric_util:kv(foo,1), fabric_util:kv(bar,1)], 2)
     ),
 
     % Not met, bail out
 
     ?assertEqual(
         no_more_workers,
-        is_r_met(Workers0, [fabric_util:kv(foo,1)], 2)
+        is_threshold_met(Workers0, [fabric_util:kv(foo,1)], 2)
     ),
 
     ?assertEqual(
         no_more_workers,
-        is_r_met(Workers1, [fabric_util:kv(foo,1)], 2)
+        is_threshold_met(Workers1, [fabric_util:kv(foo,1)], 2)
     ),
 
     ?assertEqual(
         no_more_workers,
-        is_r_met(Workers1, [fabric_util:kv(foo,1), fabric_util:kv(bar,1)], 2)
+        is_threshold_met(Workers1, [fabric_util:kv(foo,1), fabric_util:kv(bar,1)], 2)
     ),
 
     ?assertEqual(
         no_more_workers,
-        is_r_met(Workers1, [fabric_util:kv(foo,2)], 3)
+        is_threshold_met(Workers1, [fabric_util:kv(foo,2)], 3)
     ),
 
     ok.
