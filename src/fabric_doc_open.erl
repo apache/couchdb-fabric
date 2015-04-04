@@ -45,8 +45,8 @@ go(DbName, Id, Options) ->
     RexiMon = fabric_util:create_monitors(Workers),
     try fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
     {ok, #acc{}=Acc} ->
-        Reply = handle_response(Acc),
-        format_reply(Reply, SuppressDeletedDoc);
+        {Reply, Consistency} = handle_response(Acc),
+        format_reply(Reply, SuppressDeletedDoc, Consistency, Options);
     {timeout, #acc{workers=DefunctWorkers}} ->
         fabric_util:log_timeout(DefunctWorkers, "open_doc"),
         {error, timeout};
@@ -90,18 +90,18 @@ handle_response(#acc{state=r_met, replies=Replies, q_reply=QuorumReply}=Acc) ->
     case {Replies, fabric_util:remove_ancestors(Replies, [])} of
         {[_], [_]} ->
             % Complete agreement amongst all copies
-            QuorumReply;
+            {QuorumReply, consistent};
         {[_|_], [{_, {QuorumReply, _}}]} ->
             % Any divergent replies are ancestors of the QuorumReply,
             % repair the document asynchronously
             spawn(fun() -> read_repair(Acc) end),
-            QuorumReply;
+            {QuorumReply, divergent};
         _Else ->
             % real disagreement amongst the workers, block for the repair
-            read_repair(Acc)
+            {read_repair(Acc), disagreement}
     end;
 handle_response(Acc) ->
-    read_repair(Acc).
+    {read_repair(Acc), disagreement}.
 
 is_r_met(Workers, Replies, R) ->
     case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Replies) of
@@ -156,9 +156,15 @@ choose_reply(Docs) ->
     end, Docs),
     {ok, Winner}.
 
-format_reply({ok, #doc{deleted=true}}, true) ->
+format_reply({ok, #doc{deleted=true}}, true, _, _) ->
     {not_found, deleted};
-format_reply(Else, _) ->
+format_reply({ok, #doc{}=Doc}, _, Consistency, Options) ->
+    Meta = case lists:member(is_r_met, Options) of
+        true -> [{r_met, Consistency} | Doc#doc.meta];
+        false -> Doc#doc.meta
+    end,
+    {ok, Doc#doc{meta=Meta}};
+format_reply(Else, _, _, _) ->
     Else.
 
 
