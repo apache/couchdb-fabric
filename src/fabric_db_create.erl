@@ -168,7 +168,7 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
     case fabric_att_handler:external_store() of
         true ->
             DbNameSuffix = unicode:characters_to_list(DbName) ++ Suffix,
-            case fabric_att_handler:container(create,DbNameSuffix) of
+            case fabric_att_handler:dataroot(create, DbNameSuffix) of
                 {ok, Container} ->
                     couch_log:debug("Container ~p created", [Container]);
                 {error,_} ->
