@@ -162,4 +162,45 @@ merge_row(_, KeyDict, Row, Rows) ->
         if A =:= B -> IdA < IdB; true ->
             dict:fetch(A, KeyDict) < dict:fetch(B, KeyDict)
         end
-    end, [Row], Rows).
+    end, remove_missing(KeyDict, [Row]), remove_missing(KeyDict, Rows)).
+
+remove_missing(KeyDict, Rows) ->
+    lists:filter(fun(#view_row{key = Key}) ->
+        dict:is_key(Key, KeyDict)
+    end, Rows).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+-define(INVISIBLE_AA, <<226,128,139,65,65>>).
+-define(INVISIBLE_BB, <<226,128,139,66,66>>).
+
+merge_row_test() ->
+    Dict = dict:from_list([{[?INVISIBLE_BB], 1}, {[<<"AA">>], 0}]),
+    ?assertEqual(
+        [{[?INVISIBLE_BB], doc2}],
+        call_merge(Dict,
+            row([?INVISIBLE_BB], doc2), [row([?INVISIBLE_AA], doc1)])),
+    ?assertEqual(
+        [{[<<"AA">>], doc1}, {[?INVISIBLE_BB], doc2}],
+        call_merge(Dict,
+            row([?INVISIBLE_BB], doc2), [row([<<"AA">>], doc1)])),
+    ?assertEqual(
+        [{[?INVISIBLE_BB], doc0}, {[?INVISIBLE_BB], doc1}],
+        call_merge(Dict,
+            row([?INVISIBLE_BB], doc0), [row([?INVISIBLE_BB], doc1)])),
+    ?assertEqual(
+        [{[?INVISIBLE_BB], doc0}, {[?INVISIBLE_BB], doc1}],
+        call_merge(Dict,
+            row([?INVISIBLE_BB], doc1), [row([?INVISIBLE_BB], doc0)])),
+    ok.
+
+call_merge(KeyDict, Row, Rows) ->
+    Merged = merge_row(undefined, KeyDict, Row, Rows),
+    [{Key, Id} || #view_row{key = Key, id = Id} <- Merged].
+
+
+row(Key, Id) ->
+    #view_row{key = Key, id = Id}.
+
+-endif.
