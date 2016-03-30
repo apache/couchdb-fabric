@@ -29,7 +29,8 @@
     reducer,
     lang,
     sorted,
-    user_acc
+    user_acc,
+    update_seq
 }).
 
 -record(stream_acc, {
