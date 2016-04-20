@@ -17,7 +17,6 @@
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
--include_lib("eunit/include/eunit.hrl").
 
 -record(state, {
     dbname,
@@ -101,11 +100,7 @@ handle_message({ok, RawReplies0}, Worker, State) ->
         replies = All0,
         r = R
     } = State,
-    All = lists:zipwith(fun({Rev, D}, Reply) ->
-        if Reply =:= error -> {Rev, D}; true ->
-            {Rev, fabric_util:update_counter(Reply, 1, D)}
-        end
-    end, All0, RawReplies),
+    All = group_replies(All0, RawReplies),
     Reduced = [fabric_util:remove_ancestors(X, []) || {_, X} <- All],
     FinalReplies = [choose_winner(X, R) || X <- Reduced, X =/= []],
     Complete = (ReplyCount =:= (WorkerCount - 1)),
@@ -123,6 +118,31 @@ handle_message({ok, RawReplies0}, Worker, State) ->
         fabric_util:cleanup(lists:delete(Worker,Workers)),
         {stop, FinalReply}
     end.
+
+group_replies(Revs, Replies) when length(Revs) =:= length(Replies)->
+    lists:zipwith(fun({Rev, D}, Reply) ->
+        if Reply =:= error -> {Rev, D}; true ->
+            {Rev, fabric_util:update_counter(Reply, 1, D)}
+        end
+    end, Revs, Replies);
+group_replies(Revs, Replies) ->
+    lists:reverse(group_replies(Revs, Replies, [])).
+group_replies(_, [], Acc) ->
+    Acc;
+group_replies([], _, Acc) ->
+    Acc;
+group_replies([Rev | Revs], Replies, Acc) ->
+    Acc0 = group_replies(Rev, Replies, Acc),
+    group_replies(Revs, Replies, Acc0);
+group_replies({Rev, D}, [{ok, #doc{revs={Pos, Ids}}}=Reply | Rest], Acc) ->
+    case {Pos, hd(Ids)} of
+        Rev -> [{Rev, fabric_util:update_counter(Reply, 1, D)} | Acc];
+        _ -> group_replies({Rev, D}, Rest, Acc)
+    end;
+group_replies({Rev, D}, [error | _], Acc) ->
+    [{Rev, D} | Acc];
+group_replies({Rev, D}, [Reply | _], Acc) ->
+    [{Rev, fabric_util:update_counter(Reply, 1, D)} | Acc].
 
 skip(#state{revs=all} = State) ->
     handle_message({ok, []}, nil, State);
@@ -193,6 +213,9 @@ unstrip_not_found_missing([{not_found, Rev} | Rest]) ->
     [{{not_found, missing}, Rev} | unstrip_not_found_missing(Rest)];
 unstrip_not_found_missing([Else | Rest]) ->
     [Else | unstrip_not_found_missing(Rest)].
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
 
 all_revs_test() ->
     config:start_link([]),
@@ -319,3 +342,37 @@ specific_revs_test() ->
       ),
     meck:unload([fabric, couch_log, couch_stats]),
     config:stop().
+
+specific_revs_with_explicit_latest_test() ->
+    config:start_link([]),
+    meck:new([fabric, couch_stats]),
+    meck:expect(fabric, update_docs, fun(_, _, _) -> {ok, nil} end),
+    meck:expect(couch_stats, increment_counter, fun(_) -> ok end),
+    meck:new(couch_log),
+    meck:expect(couch_log, notice, fun(_,_) -> ok end),
+
+    Revs = [{1,<<"foo">>}, {2,<<"foo2">>}],
+    State0 = #state{
+        worker_count = 3,
+        workers = [nil, nil, nil],
+        r = 2,
+        revs = Revs,
+        latest = true,
+        replies = [{Rev,[]} || Rev <- Revs]
+    },
+    Foo2 = {ok, #doc{revs = {2, [<<"foo2">>, <<"foo">>]}}},
+
+    ?assertMatch(
+        {ok, #state{}},
+        handle_message({ok, [Foo2]}, nil, State0)
+    ),
+    {ok, State1} = handle_message({ok, [Foo2]}, nil, State0),
+    ?assertEqual(
+        {stop, [Foo2]},
+        handle_message({ok, [Foo2]}, nil, State1)
+    ),
+
+    meck:unload([fabric, couch_log, couch_stats]),
+    config:stop().
+
+-endif.
