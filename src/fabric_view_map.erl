@@ -129,7 +129,11 @@ handle_message({meta, Meta0}, {Worker, From}, State) ->
                 _ ->
                     [{update_seq, fabric_view_changes:pack_seqs(UpdateSeq)}]
             end,
-        {Go, Acc} = Callback({meta, Meta}, AccIn),
+        MetaType = case State#collector.sorted of
+            true -> meta;
+            false -> unsorted_meta
+        end,
+        {Go, Acc} = Callback({MetaType, Meta}, AccIn),
         {Go, State#collector{
             counters = fabric_dict:decrement_all(Counters1),
             total_rows = Total,
