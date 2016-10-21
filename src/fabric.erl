@@ -21,12 +21,13 @@
     delete_db/2, get_db_info/1, get_doc_count/1, set_revs_limit/3,
     set_security/2, set_security/3, get_revs_limit/1, get_security/1,
     get_security/2, get_all_security/1, get_all_security/2,
+    get_purged_docs_limit/1, set_purged_docs_limit/3, get_purge_seq/1,
     compact/1, compact/2]).
 
 % Documents
 -export([open_doc/3, open_revs/4, get_doc_info/3, get_full_doc_info/3,
     get_missing_revs/2, get_missing_revs/3, update_doc/3, update_docs/3,
-    purge_docs/2, att_receiver/2]).
+    purge_docs/3, att_receiver/2]).
 
 % Views
 -export([all_docs/4, all_docs/5, changes/4, query_view/3, query_view/4,
@@ -70,7 +71,8 @@ all_dbs(Prefix) when is_list(Prefix) ->
 
 %% @doc returns a property list of interesting properties
 %%      about the database such as `doc_count', `disk_size',
-%%      etc.
+%%      purge_quality 0-100 - % of converged shards that share
+%%      the largest purge_seq etc.
 -spec get_db_info(dbname()) ->
     {ok, [
         {instance_start_time, binary()} |
@@ -126,6 +128,25 @@ set_revs_limit(DbName, Limit, Options) when is_integer(Limit), Limit > 0 ->
 get_revs_limit(DbName) ->
     {ok, Db} = fabric_util:get_db(dbname(DbName), [?ADMIN_CTX]),
     try couch_db:get_revs_limit(Db) after catch couch_db:close(Db) end.
+
+%% @doc sets the upper bound for the number of stored purge requests
+-spec set_purged_docs_limit(dbname(), pos_integer(), [option()]) -> ok.
+set_purged_docs_limit(DbName, Limit, Options)
+        when is_integer(Limit), Limit > 0 ->
+    fabric_db_meta:set_purged_docs_limit(dbname(DbName), Limit, opts(Options)).
+
+%% @doc retrieves the upper bound for the number of stored purge requests
+-spec get_purged_docs_limit(dbname()) -> pos_integer() | no_return().
+get_purged_docs_limit(DbName) ->
+    {ok, Db} = fabric_util:get_db(dbname(DbName), [?ADMIN_CTX]),
+    try couch_db:get_purged_docs_limit(Db) after catch couch_db:close(Db) end.
+
+%% @doc retrieves the current purge_seq
+-spec get_purge_seq(dbname()) -> non_neg_integer() | no_return().
+get_purge_seq(DbName) ->
+    {ok, Db} = fabric_util:get_db(dbname(DbName), [?ADMIN_CTX]),
+    try couch_db:get_purge_seq(Db) after catch couch_db:close(Db) end.
+
 
 %% @doc sets the readers/writers/admin permissions for a database
 -spec set_security(dbname(), SecObj::json_obj()) -> ok.
@@ -267,8 +288,13 @@ update_docs(DbName, Docs, Options) ->
         {aborted, PreCommitFailures}
     end.
 
-purge_docs(_DbName, _IdsRevs) ->
-    not_implemented.
+%% @doc purge revisions for a list '{Id, Revs}'
+%%      returns {ok, {PurgeSeq, [IdRevs]}}
+-spec purge_docs(dbname(), [{docid(), [revision()]}], [option()]) ->
+    {ok, {any(), [{docid(), [any()]}] }}.
+purge_docs(DbName, IdsRevs, Options) when is_list(IdsRevs) ->
+    IdsRevs2 = [idrevs(IdRs) || IdRs <- IdsRevs],
+    fabric_doc_purge:go(dbname(DbName), IdsRevs2, opts(Options)).
 
 %% @doc spawns a process to upload attachment data and
 %%      returns a function that shards can use to communicate
