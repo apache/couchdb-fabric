@@ -22,7 +22,8 @@ go(_, [], _) ->
     {ok, []};
 go(DbName, AllDocs0, Opts) ->
     AllDocs1 = before_doc_update(DbName, AllDocs0, Opts),
-    AllDocs = tag_docs(AllDocs1),
+    AllDocs2 = tag_docs(AllDocs1),
+    AllDocs = randomize(AllDocs2),
     validate_atomic_update(DbName, AllDocs, lists:member(all_or_nothing, Opts)),
     Options = lists:delete(all_or_nothing, Opts),
     GroupedDocs = lists:map(fun({#shard{name=Name, node=Node} = Shard, Docs}) ->
@@ -121,6 +122,14 @@ untag_docs([]) ->
     [];
 untag_docs([#doc{meta=Meta}=Doc | Rest]) ->
     [Doc#doc{meta=lists:keydelete(ref, 1, Meta)} | untag_docs(Rest)].
+
+randomize([]) ->
+    [];
+randomize([#doc{revs = {0, []}} = Doc | Rest]) ->
+    Rnd = couch_uuids:random(),
+    [Doc#doc{meta = [{rnd, Rnd} | Doc#doc.meta]} | randomize(Rest)];
+randomize([Doc | Rest]) ->
+    [Doc | randomize(Rest)].
 
 force_reply(Doc, [], {_, W, Acc}) ->
     {error, W, [{Doc, {error, internal_server_error}} | Acc]};
