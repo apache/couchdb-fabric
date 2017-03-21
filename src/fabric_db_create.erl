@@ -164,6 +164,19 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
         {[[<<"add">>, Range, Node] | Raw], orddict:append(Node, Range, ByNode),
             orddict:append(Range, Node, ByRange)}
     end, {[], [], []}, Shards),
+
+    case fabric_att_handler:external_store() of
+        true ->
+            DbNameSuffix = unicode:characters_to_list(DbName) ++ Suffix,
+            case fabric_att_handler:dataroot(create, DbNameSuffix) of
+                {ok, Container} ->
+                    couch_log:debug("Container ~p created", [Container]);
+                {error,_} ->
+                    couch_log:debug("Container ~p creation failed", [DbNameSuffix])
+            end;
+        false ->
+            couch_log:debug("Store attachmets externally is disabled",[])
+    end,
     #doc{id=DbName, body = {[
         {<<"shard_suffix">>, Suffix},
         {<<"changelog">>, lists:sort(RawOut)},
