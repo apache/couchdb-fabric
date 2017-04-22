@@ -258,6 +258,9 @@ find_next_key([], _, _, _) ->
 find_next_key([Key|Rest], _, _, _) ->
     {Key, Rest}.
 
+transform_row(#view_row{id=reduced, value={[{builtin_reduce_error,Reason},
+        {invalid_value,Value}]}}) ->
+    {row, [{id,builtin_reduce_error}, {reason,Reason}, {value,Value}]};
 transform_row(#view_row{key=Key, id=reduced, value=Value}) ->
     {row, [{key,Key}, {value,Value}]};
 transform_row(#view_row{key=Key, id=undefined}) ->
